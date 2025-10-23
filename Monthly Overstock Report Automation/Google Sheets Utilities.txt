@@ -1,0 +1,53 @@
+import gspread
+from gspread.exceptions import WorksheetNotFound
+from gspread_dataframe import set_with_dataframe
+
+# Module-level variable to hold the spreadsheet object
+_ss = None
+
+def init_gspread(service_key_path: str, sheet_id: str):
+    """Initializes the gspread service and opens the spreadsheet."""
+    global _ss
+    try:
+        gc = gspread.service_account(filename=service_key_path)
+        _ss = gc.open_by_key(sheet_id)
+        print("Successfully connected to Google Sheet.")
+    except Exception as e:
+        print(f"Error: Could not connect to Google Sheets.")
+        print(f"Details: {e}")
+        print("Please check SERVICE_ACCOUNT_FILE and GOOGLE_SHEET_ID in your .env file.")
+        print("Also ensure the service account email has 'Editor' access to the Sheet.")
+        exit(1)
+
+def get_or_create_worksheet(title: str, nrows: int, ncols: int) -> gspread.Worksheet:
+    """
+    Return a worksheet with 'title'; create if missing with at least nrows x ncols.
+    """
+    if _ss is None:
+        raise Exception("GSpread not initialized. Call init_gspread() first.")
+    
+    try:
+        ws = _ss.worksheet(title)
+        print(f"Found existing worksheet: '{title}'")
+        return ws
+    except WorksheetNotFound:
+        print(f"Worksheet '{title}' not found. Creating...")
+        # Add extra rows/cols for buffer
+        init_rows = max(nrows + 5, 100) 
+        init_cols = max(ncols, 26) # 26 = 'Z'
+        return _ss.add_worksheet(title=title, rows=init_rows, cols=init_cols)
+
+def write_dataframe_to_sheet(ws: gspread.Worksheet, df, freeze_header=True):
+    """Clears a worksheet and writes a DataFrame to it."""
+    if _ss is None:
+        raise Exception("GSpread not initialized.")
+        
+    try:
+        ws.clear()
+        set_with_dataframe(ws, df)
+        if freeze_header:
+            ws.freeze(rows=1)
+        print(f"Successfully wrote {len(df)} rows to '{ws.title}'.")
+    except Exception as e:
+        # Don't fail the whole script, but warn the user
+        print(f"Warning: Could not write or freeze header for '{ws.title}'. Error: {e}")

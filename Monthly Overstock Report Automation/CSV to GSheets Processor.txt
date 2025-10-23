@@ -1,0 +1,165 @@
+import os
+import pandas as pd
+from dotenv import load_dotenv
+import gsheets_utils as gsu # Our new utility module
+
+def load_config():
+    """Load environment variables from .env file."""
+    load_dotenv()
+    config = {
+        "csv_path": os.getenv("CSV_INPUT_PATH"),
+        "service_key": os.getenv("SERVICE_ACCOUNT_FILE"),
+        "sheet_id": os.getenv("GOOGLE_SHEET_ID"),
+    }
+    
+    # Validate that all config variables are present
+    if not all(config.values()):
+        print("Error: Missing one or more environment variables.")
+        print("Please create a .env file (from .env.example) and fill in:")
+        print("SERVICE_ACCOUNT_FILE, GOOGLE_SHEET_ID, CSV_INPUT_PATH")
+        exit(1)
+    return config
+
+def load_and_clean_data(csv_path: str) -> pd.DataFrame:
+    """Loads the CSV, cleans headers, and processes data."""
+    print(f"Loading data from {csv_path}...")
+    try:
+        df = pd.read_csv(
+            csv_path,
+            sep=";",
+            encoding="cp1252", # Good for German special chars
+            low_memory=False,
+            dtype={
+                "ZIELLHM": "string",
+                "REFERENZNUMMER": "string",
+                "KATEGORIE": "string",
+            }
+        )
+    except FileNotFoundError:
+        print(f"Error: The file was not found at {csv_path}")
+        print("Please check the 'CSV_INPUT_PATH' in your .env file.")
+        exit(1)
+    except Exception as e:
+        print(f"Error reading CSV: {e}")
+        exit(1)
+
+    print("Data loaded. Cleaning and transforming...")
+
+    # Clean column names (e.g., "SORTIERKRITERIUM\nID" -> "SORTIERKRITERIUM ID")
+    df.columns = df.columns.str.replace('\n', ' ', regex=False).str.strip()
+
+    # Normalize header if "QUALITÄT" came in garbled (e.g., 'QUALITT')
+    if "QUALITÄT" not in df.columns:
+        for c in df.columns:
+            if c.upper().startswith("QUALIT"):
+                df = df.rename(columns={c: "QUALITÄT"})
+                print(f"Renamed column '{c}' to 'QUALITÄT'")
+                break
+    
+    # Parse ZEITSTEMPEL (German-style dates are often day-first)
+    df["ZEITSTEMPEL"] = pd.to_datetime(df["ZEITSTEMPEL"], dayfirst=True, errors="coerce")
+    df = df.dropna(subset=["ZEITSTEMPEL"]).copy()
+
+    # Strip whitespace in key text columns
+    for col in ["REFERENZNUMMER", "KATEGORIE", "QUALITÄT"]:
+        if col in df.columns:
+            df[col] = df[col].astype("string").str.strip()
+            
+    # Build month key mm.yyyy
+    df["month_key"] = df["ZEITSTEMPEL"].dt.strftime("%m.%Y")
+    
+    print("Data cleaning complete.")
+    return df
+
+def process_batch_1(df: pd.DataFrame):
+    """Filters and uploads data for Batch 1 (ZFS)."""
+    print("\n--- Processing Batch 1 (ZFS) ---")
+    
+    # Note: Using "SORTIERKRITERIUM ID" after cleaning headers
+    batch1_cols = [
+        "EAN", "KATEGORIE", "ZIELKANAL", "QUALITÄT", "ZEITSTEMPEL",
+        "SORTIERKRITERIUM ID", "REFERENZNUMMER", "month_key"
+    ]
+    
+    # Ensure all required columns exist
+    missing_cols = [col for col in batch1_cols if col not in df.columns and col != "month_key"]
+    if missing_cols:
+        print(f"Warning: Missing columns for Batch 1: {missing_cols}. Skipping.")
+        return
+
+    batch1 = df[df["REFERENZNUMMER"].isin(["ZFS24", "GUESS neu", "GUESS old"])].copy()
+    
+    if batch1.empty:
+        print("No data found for Batch 1.")
+        return
+
+    batch1 = batch1[batch1_cols]
+
+    for month_key, group in batch1.groupby("month_key", sort=True):
+        ws_title = f"ZFS{month_key}"
+        to_write = (
+            group.sort_values("ZEITSTEMPEL", ascending=True)
+                 .drop(columns="month_key", errors="ignore")
+        )
+        
+        ws = gsu.get_or_create_worksheet(ws_title, nrows=len(to_write)+1, ncols=to_write.shape[1])
+        gsu.write_dataframe_to_sheet(ws, to_write)
+
+def process_batch_2(df: pd.DataFrame):
+    """Filters and uploads data for Batch 2 (BBeauty)."""
+    print("\n--- Processing Batch 2 (BBeauty) ---")
+    
+    batch2_cols = [
+        "EAN", "KATEGORIE", "ZIELKANAL", "QUALITÄT", "ZEITSTEMPEL",
+        "SORTIERKRITERIUM ID", "month_key"
+    ]
+    
+    # Ensure all required columns exist
+    missing_cols = [col for col in batch2_cols if col not in df.columns and col != "month_key"]
+    if missing_cols:
+        print(f"Warning: Missing columns for Batch 2: {missing_cols}. Skipping.")
+        return
+        
+    if "QUALITÄT" not in df.columns:
+        print("Warning: 'QUALITÄT' column not found. Skipping Batch 2.")
+        return
+
+    batch2 = df[(df["KATEGORIE"] == "Beauty") & (df["QUALITÄT"] == "B")].copy()
+
+    if batch2.empty:
+        print("No data found for Batch 2.")
+        return
+
+    batch2 = batch2[batch2_cols]
+    
+    for month_key, group in batch2.groupby("month_key", sort=True):
+        ws_title = f"BBeauty{month_key}"
+        to_write = (
+            group.sort_values("ZEITSTEMPEL", ascending=True)
+                 .drop(columns="month_key", errors="ignore")
+        )
+        
+        ws = gsu.get_or_create_worksheet(ws_title, nrows=len(to_write)+1, ncols=to_write.shape[1])
+        gsu.write_dataframe_to_sheet(ws, to_write)
+
+def main():
+    """Main execution function."""
+    print("--- Starting CSV to Google Sheets Uploader ---")
+    
+    # 1. Load Config
+    config = load_config()
+    
+    # 2. Connect to GSheets
+    gsu.init_gspread(config["service_key"], config["sheet_id"])
+    
+    # 3. Load and transform data
+    df = load_and_clean_data(config["csv_path"])
+    
+    # 4. Process batches
+    process_batch_1(df)
+    process_batch_2(df)
+    
+    print("\n--- Script finished successfully! ---")
+
+if __name__ == "__main__":
+    main()

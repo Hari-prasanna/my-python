@@ -1,0 +1,22 @@
+Python cache and virtual environments
+
+pycache/
+*.py[cod]
+venv/
+.venv/
+env/
+
+Environment files
+
+.env
+
+Secret keys
+
+*.json
+service-account.json
+
+IDE / OS files
+
+.vscode/
+.idea/
+.DS_Store
